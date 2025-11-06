@@ -7,6 +7,7 @@ import (
 
 	"github.com/diagnosis/luxsuv-api-v2/internal/api"
 	"github.com/diagnosis/luxsuv-api-v2/internal/logger"
+	"github.com/diagnosis/luxsuv-api-v2/internal/mailer"
 	"github.com/diagnosis/luxsuv-api-v2/internal/secure"
 	"github.com/diagnosis/luxsuv-api-v2/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,6 +16,7 @@ import (
 type Application struct {
 	DB            *pgxpool.Pool
 	Signer        *secure.Signer
+	Mailer        *mailer.Mailer
 	HealthHandler *api.HealthHandler
 	UserHandler   *api.UserHandler
 }
@@ -44,12 +46,23 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 	}
 	logger.Info(ctx, "JWT signer initialized", "issuer", issuer, "audience", audience)
 
+	mailService := mailer.NewMailer()
+	if mailService.IsConfigured() {
+		logger.Info(ctx, "SMTP mailer initialized")
+	} else {
+		logger.Warn(ctx, "SMTP mailer not configured, email functionality will be disabled")
+	}
+
 	userHandler := api.NewUserHandler(userStore, signer, refreshTokenStore)
 
 	logger.Info(ctx, "application initialized successfully")
 
 	return &Application{
-		pool, signer, healthHandler, userHandler,
+		DB:            pool,
+		Signer:        signer,
+		Mailer:        mailService,
+		HealthHandler: healthHandler,
+		UserHandler:   userHandler,
 	}, nil
 
 }
