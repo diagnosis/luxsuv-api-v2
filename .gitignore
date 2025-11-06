@@ -1,0 +1,90 @@
+# === Go ===
+bin/
+dist/
+build/
+*.exe
+*.test
+*.out
+
+# Go module cache & vendor
+vendor/
+go.work
+go.work.sum
+
+# === Environment / Config ===
+.env
+.env.*
+*.local
+.envrc
+.envrc.*
+infisical-service-token.txt
+infisical.env
+*.secrets.json
+*.private.json
+
+# === Logs ===
+*.log
+*.pid
+*.seed
+*.bak
+
+# === Database / Migrations ===
+*.db
+*.sqlite
+*.sql~          # temp SQL edits
+migrations/*.tmp
+
+# === IDE / Editors ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*.iml
+*.sublime-workspace
+*.sublime-project
+
+# === OS Files ===
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Icon?
+._*
+
+# === Docker ===
+docker-compose.override.yml
+docker-compose.local.yml
+**/docker-data/
+**/tmp-data/
+**/pgdata/
+**/mailpit-data/
+**/redis-data/
+**/postgres-data/
+
+# === Tests / Coverage ===
+coverage.out
+coverage/
+*.coverprofile
+*.prof
+
+# === Builds / Artifacts ===
+*.tar.gz
+*.zip
+*.tgz
+*.gz
+
+# === Frontend (if you add React later) ===
+node_modules/
+*.lock
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+vite.config.local.*
+dist/
+build/
+
+# === Misc ===
+tmp/
+temp/
+.cache/
+*.tmp
+*.bak
