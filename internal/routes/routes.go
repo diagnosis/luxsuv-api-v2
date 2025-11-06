@@ -10,7 +10,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-func SetRouter(app *app.Applicaiton) *chi.Mux {
+func SetRouter(app *app.Application) *chi.Mux {
 	r := chi.NewRouter()
 
 	corsConfig := customMiddleware.DefaultCORSConfig()

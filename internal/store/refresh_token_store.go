@@ -154,8 +154,18 @@ func (s *PostgresRefreshTokenStore) Rotate(ctx context.Context, oldID uuid.UUID,
 	}
 
 	// Revoke old
-	if _, err := tx.Exec(ctx, `UPDATE auth_refresh_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL`, oldID, nowUTC); err != nil {
+	tag, err := tx.Exec(ctx, `
+  UPDATE auth_refresh_tokens
+  SET revoked_at = $2
+  WHERE id = $1 AND revoked_at IS NULL
+`, oldID, nowUTC)
+	if err != nil {
 		return "", RefreshToken{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		// Shouldn’t normally happen because you hold the row lock and
+		// just validated revoked_at is NULL, but if it does, treat as a race/invalid state.
+		return "", RefreshToken{}, ErrRotateRace
 	}
 
 	// Create new

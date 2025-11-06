@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -86,7 +87,7 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, _, err := h.Signer.MintAccess(u.ID, helper.DeferOrString(u.Role, "rider"))
+	accessToken, _, err := h.Signer.MintAccess(u.ID, helper.DerefOrString(u.Role, "rider"))
 	if err != nil {
 		helper.RespondError(w, r, apperror.InternalError("Failed to generate access token", err))
 		logger.Error(ctx, "failed to mint access token", "user_id", u.ID, "error", err)
@@ -106,16 +107,24 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	logger.Audit(ctx, logger.AuditUserLogin, &u.ID, helper.ClientIP(r), r.UserAgent(), true, map[string]any{
 		"email": email,
 	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    refreshTokenPlain,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   strings.EqualFold(os.Getenv("APP_ENV"), "production"),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
+	})
 
 	response := map[string]any{
-		"access_token":  accessToken,
-		"refresh_token": refreshTokenPlain,
-		"token_type":    "Bearer",
-		"expires_in":    int(h.Signer.AccessTTL.Seconds()),
+		"access_token": accessToken,
+		"token_type":   "Bearer",
+		"expires_in":   int(h.Signer.AccessTTL.Seconds()),
 		"user": map[string]any{
 			"id":    u.ID,
 			"email": u.Email,
-			"role":  helper.DeferOrString(u.Role, "rider"),
+			"role":  helper.DerefOrString(u.Role, "rider"),
 		},
 	}
 

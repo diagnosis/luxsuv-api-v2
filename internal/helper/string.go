@@ -4,7 +4,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func DeferOrString(p *string, def string) string {
+func DerefOrString(p *string, def string) string {
 	if p != nil && *p != "" {
 		return *p
 	}

@@ -13,9 +13,11 @@ CREATE TABLE auth_refresh_tokens (
     ip           INET
 );
 
-CREATE INDEX idx_refresh_user_id  ON auth_refresh_tokens(user_id);
-CREATE INDEX idx_refresh_hash     ON auth_refresh_tokens(token_hash);
-CREATE INDEX idx_refresh_revoked  ON auth_refresh_tokens(revoked_at);
+CREATE INDEX IF NOT EXISTS idx_refresh_user_id      ON auth_refresh_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_refresh_hash         ON auth_refresh_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_refresh_revoked      ON auth_refresh_tokens(revoked_at);
+CREATE INDEX IF NOT EXISTS idx_refresh_user_active  ON auth_refresh_tokens(user_id) WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_refresh_expires      ON auth_refresh_tokens(expires_at);
 -- +goose StatementEnd
 
 -- +goose Down

@@ -12,14 +12,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-type Applicaiton struct {
+type Application struct {
 	DB            *pgxpool.Pool
 	Signer        *secure.Signer
 	HealthHandler *api.HealthHandler
 	UserHandler   *api.UserHandler
 }
 
-func NewApplication(pool *pgxpool.Pool) (*Applicaiton, error) {
+func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 	ctx := context.Background()
 	logger.Info(ctx, "initializing application")
 
@@ -48,7 +48,7 @@ func NewApplication(pool *pgxpool.Pool) (*Applicaiton, error) {
 
 	logger.Info(ctx, "application initialized successfully")
 
-	return &Applicaiton{
+	return &Application{
 		pool, signer, healthHandler, userHandler,
 	}, nil
 
