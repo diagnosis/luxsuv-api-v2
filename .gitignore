@@ -88,3 +88,4 @@ temp/
 .cache/
 *.tmp
 *.bak
+.infisical.json
