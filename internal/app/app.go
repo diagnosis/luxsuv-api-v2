@@ -48,7 +48,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 
 	mailService := mailer.NewMailer()
 	if mailService.IsConfigured() {
-		logger.Info(ctx, "SMTP mailer initialized")
+		logger.Info(ctx, "SMTP mailer initialized", "type", mailService.GetMailerType())
 	} else {
 		logger.Warn(ctx, "SMTP mailer not configured, email functionality will be disabled")
 	}

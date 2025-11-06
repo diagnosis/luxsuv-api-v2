@@ -13,26 +13,67 @@ import (
 	"github.com/diagnosis/luxsuv-api-v2/internal/logger"
 )
 
+type MailerType string
+
+const (
+	MailerTypeLocal MailerType = "local"
+	MailerTypeZepto MailerType = "zepto"
+)
+
 type Mailer struct {
-	host     string
-	port     string
-	username string
-	password string
-	from     string
+	mailerType MailerType
+	host       string
+	port       string
+	username   string
+	password   string
+	from       string
+	useTLS     bool
 }
 
 func NewMailer() *Mailer {
+	mailerType := os.Getenv("MAILER_TYPE")
+	if mailerType == "" {
+		mailerType = "local"
+	}
+
+	host := os.Getenv("SMTP_HOST")
+	port := os.Getenv("SMTP_PORT")
+	username := os.Getenv("SMTP_USERNAME")
+	password := os.Getenv("SMTP_PASSWORD")
+	from := os.Getenv("SMTP_FROM")
+
+	useTLS := true
+	if MailerType(mailerType) == MailerTypeZepto {
+		if host == "" {
+			host = "smtp.zeptomail.com"
+		}
+		if port == "" {
+			port = "587"
+		}
+		useTLS = false
+	} else {
+		if port == "" {
+			port = "465"
+		}
+	}
+
 	return &Mailer{
-		host:     os.Getenv("SMTP_HOST"),
-		port:     os.Getenv("SMTP_PORT"),
-		username: os.Getenv("SMTP_USERNAME"),
-		password: os.Getenv("SMTP_PASSWORD"),
-		from:     os.Getenv("SMTP_FROM"),
+		mailerType: MailerType(mailerType),
+		host:       host,
+		port:       port,
+		username:   username,
+		password:   password,
+		from:       from,
+		useTLS:     useTLS,
 	}
 }
 
 func (m *Mailer) IsConfigured() bool {
 	return m.host != "" && m.port != "" && m.username != "" && m.password != "" && m.from != ""
+}
+
+func (m *Mailer) GetMailerType() MailerType {
+	return m.mailerType
 }
 
 type EmailData struct {
@@ -52,8 +93,14 @@ func (m *Mailer) Send(ctx context.Context, data EmailData) error {
 		return fmt.Errorf("no recipients specified")
 	}
 
-	msg := m.buildMessage(data)
+	if m.useTLS {
+		return m.sendWithTLS(ctx, data)
+	}
+	return m.sendWithSTARTTLS(ctx, data)
+}
 
+func (m *Mailer) sendWithTLS(ctx context.Context, data EmailData) error {
+	msg := m.buildMessage(data)
 	auth := smtp.PlainAuth("", m.username, m.password, m.host)
 	addr := fmt.Sprintf("%s:%s", m.host, m.port)
 
@@ -110,7 +157,72 @@ func (m *Mailer) Send(ctx context.Context, data EmailData) error {
 		return fmt.Errorf("failed to close data writer: %w", err)
 	}
 
-	logger.Info(ctx, "email sent successfully", "to", strings.Join(data.To, ", "), "subject", data.Subject)
+	logger.Info(ctx, "email sent successfully via TLS", "to", strings.Join(data.To, ", "), "subject", data.Subject, "mailer", m.mailerType)
+	return nil
+}
+
+func (m *Mailer) sendWithSTARTTLS(ctx context.Context, data EmailData) error {
+	msg := m.buildMessage(data)
+	auth := smtp.PlainAuth("", m.username, m.password, m.host)
+	addr := fmt.Sprintf("%s:%s", m.host, m.port)
+
+	client, err := smtp.Dial(addr)
+	if err != nil {
+		logger.Error(ctx, "failed to connect to SMTP server", "error", err)
+		return fmt.Errorf("failed to connect to SMTP server: %w", err)
+	}
+	defer client.Quit()
+
+	if err = client.Hello("localhost"); err != nil {
+		logger.Error(ctx, "failed to send HELLO", "error", err)
+		return fmt.Errorf("failed to send HELLO: %w", err)
+	}
+
+	tlsConfig := &tls.Config{
+		ServerName: m.host,
+	}
+
+	if err = client.StartTLS(tlsConfig); err != nil {
+		logger.Error(ctx, "failed to start TLS", "error", err)
+		return fmt.Errorf("failed to start TLS: %w", err)
+	}
+
+	if err = client.Auth(auth); err != nil {
+		logger.Error(ctx, "SMTP authentication failed", "error", err)
+		return fmt.Errorf("SMTP authentication failed: %w", err)
+	}
+
+	if err = client.Mail(m.from); err != nil {
+		logger.Error(ctx, "failed to set sender", "error", err)
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+
+	for _, recipient := range data.To {
+		if err = client.Rcpt(recipient); err != nil {
+			logger.Error(ctx, "failed to add recipient", "recipient", recipient, "error", err)
+			return fmt.Errorf("failed to add recipient %s: %w", recipient, err)
+		}
+	}
+
+	writer, err := client.Data()
+	if err != nil {
+		logger.Error(ctx, "failed to initialize data transfer", "error", err)
+		return fmt.Errorf("failed to initialize data transfer: %w", err)
+	}
+
+	_, err = writer.Write([]byte(msg))
+	if err != nil {
+		logger.Error(ctx, "failed to write message", "error", err)
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+
+	err = writer.Close()
+	if err != nil {
+		logger.Error(ctx, "failed to close data writer", "error", err)
+		return fmt.Errorf("failed to close data writer: %w", err)
+	}
+
+	logger.Info(ctx, "email sent successfully via STARTTLS", "to", strings.Join(data.To, ", "), "subject", data.Subject, "mailer", m.mailerType)
 	return nil
 }
 
