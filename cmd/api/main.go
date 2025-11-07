@@ -17,9 +17,9 @@ import (
 )
 
 func main() {
+
 	ctx := context.Background()
 	logger.Info(ctx, "starting application")
-
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		logger.Error(ctx, "DATABASE_URL environment variable is required")

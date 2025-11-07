@@ -27,38 +27,46 @@ type Mailer struct {
 	username   string
 	password   string
 	from       string
-	useTLS     bool
+	useTLS     bool // true means "secure channel": STARTTLS on 587 or implicit TLS on 465
 }
 
 func NewMailer() *Mailer {
-	mailerType := os.Getenv("MAILER_TYPE")
-	if mailerType == "" {
-		mailerType = "local"
-	}
+	logger.Info(context.Background(), "mailer starting",
+		"host", os.Getenv("SMTP_HOST"),
+		"port", os.Getenv("SMTP_PORT"),
+		"useTLS", os.Getenv("SMTP_USE_TLS"),
+	)
 
-	host := os.Getenv("SMTP_HOST")
-	port := os.Getenv("SMTP_PORT")
+	host := strings.TrimSpace(os.Getenv("SMTP_HOST"))
+	port := strings.TrimSpace(os.Getenv("SMTP_PORT"))
 	username := os.Getenv("SMTP_USERNAME")
 	password := os.Getenv("SMTP_PASSWORD")
-	from := os.Getenv("SMTP_FROM")
+	from := strings.TrimSpace(os.Getenv("SMTP_FROM"))
+	useTLS := strings.EqualFold(strings.TrimSpace(os.Getenv("SMTP_USE_TLS")), "true")
 
-	useTLS := true
-	if MailerType(mailerType) == MailerTypeZepto {
-		if host == "" {
+	// Defaults
+	if port == "" {
+		if useTLS {
+			port = "587" // Zepto default (STARTTLS)
+		} else {
+			port = "1025" // Mailpit default (plain)
+		}
+	}
+	if host == "" {
+		if useTLS {
 			host = "smtp.zeptomail.com"
+		} else {
+			host = "127.0.0.1"
 		}
-		if port == "" {
-			port = "587"
-		}
-		useTLS = false
-	} else {
-		if port == "" {
-			port = "465"
-		}
+	}
+
+	mt := MailerTypeLocal
+	if useTLS {
+		mt = MailerTypeZepto
 	}
 
 	return &Mailer{
-		mailerType: MailerType(mailerType),
+		mailerType: mt,
 		host:       host,
 		port:       port,
 		username:   username,
@@ -68,13 +76,18 @@ func NewMailer() *Mailer {
 	}
 }
 
+// Dev-friendly: in plain mode we don't require username/password.
 func (m *Mailer) IsConfigured() bool {
-	return m.host != "" && m.port != "" && m.username != "" && m.password != "" && m.from != ""
+	if m.host == "" || m.port == "" || m.from == "" {
+		return false
+	}
+	if m.useTLS {
+		return m.username != "" && m.password != ""
+	}
+	return true
 }
 
-func (m *Mailer) GetMailerType() MailerType {
-	return m.mailerType
-}
+func (m *Mailer) GetMailerType() MailerType { return m.mailerType }
 
 type EmailData struct {
 	To      []string
@@ -85,164 +98,193 @@ type EmailData struct {
 
 func (m *Mailer) Send(ctx context.Context, data EmailData) error {
 	if !m.IsConfigured() {
-		logger.Warn(ctx, "SMTP not configured, skipping email send")
 		return fmt.Errorf("SMTP not configured")
 	}
-
 	if len(data.To) == 0 {
 		return fmt.Errorf("no recipients specified")
 	}
 
-	if m.useTLS {
+	// Route selection: prefer semantics (useTLS) + port.
+	logger.Info(ctx, "mailer send path", "host", m.host, "port", m.port, "useTLS", m.useTLS)
+
+	switch {
+	// Zepto standard: STARTTLS on 587
+	case m.useTLS && m.port == "587":
+		return m.sendWithSTARTTLS(ctx, data)
+
+	// Implicit TLS (465)
+	case m.useTLS && m.port == "465":
 		return m.sendWithTLS(ctx, data)
+
+	// Plain (Mailpit 1025 or any non-TLS local)
+	default:
+		return m.sendPlain(ctx, data)
 	}
-	return m.sendWithSTARTTLS(ctx, data)
 }
 
-func (m *Mailer) sendWithTLS(ctx context.Context, data EmailData) error {
+// Plain, no TLS (Mailpit: 1025). AUTH optional if creds present.
+func (m *Mailer) sendPlain(ctx context.Context, data EmailData) error {
 	msg := m.buildMessage(data)
-	auth := smtp.PlainAuth("", m.username, m.password, m.host)
 	addr := fmt.Sprintf("%s:%s", m.host, m.port)
 
-	tlsConfig := &tls.Config{
-		ServerName: m.host,
-	}
-
-	conn, err := tls.Dial("tcp", addr, tlsConfig)
+	c, err := smtp.Dial(addr)
 	if err != nil {
-		logger.Error(ctx, "failed to establish TLS connection", "error", err)
-		return fmt.Errorf("failed to connect to SMTP server: %w", err)
+		logger.Error(ctx, "smtp dial (plain) failed", "error", err)
+		return fmt.Errorf("dial SMTP: %w", err)
 	}
-	defer conn.Close()
+	defer c.Quit()
 
-	client, err := smtp.NewClient(conn, m.host)
-	if err != nil {
-		logger.Error(ctx, "failed to create SMTP client", "error", err)
-		return fmt.Errorf("failed to create SMTP client: %w", err)
-	}
-	defer client.Quit()
-
-	if err = client.Auth(auth); err != nil {
-		logger.Error(ctx, "SMTP authentication failed", "error", err)
-		return fmt.Errorf("SMTP authentication failed: %w", err)
-	}
-
-	if err = client.Mail(m.from); err != nil {
-		logger.Error(ctx, "failed to set sender", "error", err)
-		return fmt.Errorf("failed to set sender: %w", err)
-	}
-
-	for _, recipient := range data.To {
-		if err = client.Rcpt(recipient); err != nil {
-			logger.Error(ctx, "failed to add recipient", "recipient", recipient, "error", err)
-			return fmt.Errorf("failed to add recipient %s: %w", recipient, err)
+	// AUTH only if creds provided (Mailpit typically doesn't use auth)
+	if m.username != "" && m.password != "" {
+		if err := c.Auth(smtp.PlainAuth("", m.username, m.password, m.host)); err != nil {
+			logger.Error(ctx, "smtp auth (plain) failed", "error", err)
+			return fmt.Errorf("smtp auth: %w", err)
 		}
 	}
 
-	writer, err := client.Data()
+	if err := c.Mail(m.from); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+	for _, rcpt := range data.To {
+		if err := c.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("failed to add recipient %s: %w", rcpt, err)
+		}
+	}
+	w, err := c.Data()
 	if err != nil {
-		logger.Error(ctx, "failed to initialize data transfer", "error", err)
 		return fmt.Errorf("failed to initialize data transfer: %w", err)
 	}
-
-	_, err = writer.Write([]byte(msg))
-	if err != nil {
-		logger.Error(ctx, "failed to write message", "error", err)
+	if _, err := w.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
-
-	err = writer.Close()
-	if err != nil {
-		logger.Error(ctx, "failed to close data writer", "error", err)
+	if err := w.Close(); err != nil {
 		return fmt.Errorf("failed to close data writer: %w", err)
 	}
 
-	logger.Info(ctx, "email sent successfully via TLS", "to", strings.Join(data.To, ", "), "subject", data.Subject, "mailer", m.mailerType)
+	logger.Info(ctx, "email sent (plain)", "to", strings.Join(data.To, ", "), "subject", data.Subject)
 	return nil
 }
 
+// STARTTLS on 587 (upgrade after EHLO), with AUTH if provided.
 func (m *Mailer) sendWithSTARTTLS(ctx context.Context, data EmailData) error {
 	msg := m.buildMessage(data)
-	auth := smtp.PlainAuth("", m.username, m.password, m.host)
 	addr := fmt.Sprintf("%s:%s", m.host, m.port)
 
-	client, err := smtp.Dial(addr)
+	c, err := smtp.Dial(addr)
 	if err != nil {
-		logger.Error(ctx, "failed to connect to SMTP server", "error", err)
+		logger.Error(ctx, "smtp dial (starttls) failed", "error", err)
 		return fmt.Errorf("failed to connect to SMTP server: %w", err)
 	}
-	defer client.Quit()
+	defer c.Quit()
 
-	if err = client.Hello("localhost"); err != nil {
-		logger.Error(ctx, "failed to send HELLO", "error", err)
-		return fmt.Errorf("failed to send HELLO: %w", err)
+	// EHLO/HELO to populate server extensions
+	if err := c.Hello("localhost"); err != nil {
+		return fmt.Errorf("smtp hello: %w", err)
 	}
-
-	tlsConfig := &tls.Config{
-		ServerName: m.host,
+	if ok, _ := c.Extension("STARTTLS"); !ok {
+		return fmt.Errorf("server does not advertise STARTTLS")
 	}
-
-	if err = client.StartTLS(tlsConfig); err != nil {
-		logger.Error(ctx, "failed to start TLS", "error", err)
+	if err := c.StartTLS(&tls.Config{ServerName: m.host}); err != nil {
+		logger.Error(ctx, "failed to start TLS (starttls)", "error", err)
 		return fmt.Errorf("failed to start TLS: %w", err)
 	}
 
-	if err = client.Auth(auth); err != nil {
-		logger.Error(ctx, "SMTP authentication failed", "error", err)
-		return fmt.Errorf("SMTP authentication failed: %w", err)
-	}
-
-	if err = client.Mail(m.from); err != nil {
-		logger.Error(ctx, "failed to set sender", "error", err)
-		return fmt.Errorf("failed to set sender: %w", err)
-	}
-
-	for _, recipient := range data.To {
-		if err = client.Rcpt(recipient); err != nil {
-			logger.Error(ctx, "failed to add recipient", "recipient", recipient, "error", err)
-			return fmt.Errorf("failed to add recipient %s: %w", recipient, err)
+	// After STARTTLS, authenticate if creds provided
+	if m.username != "" && m.password != "" {
+		// Extension("AUTH") often true post-STARTTLS; if false, still try AUTH.
+		if err := c.Auth(smtp.PlainAuth("", m.username, m.password, m.host)); err != nil {
+			logger.Error(ctx, "smtp auth (starttls) failed", "error", err)
+			return fmt.Errorf("SMTP authentication failed: %w", err)
 		}
 	}
 
-	writer, err := client.Data()
+	if err := c.Mail(m.from); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+	for _, rcpt := range data.To {
+		if err := c.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("failed to add recipient %s: %w", rcpt, err)
+		}
+	}
+
+	w, err := c.Data()
 	if err != nil {
-		logger.Error(ctx, "failed to initialize data transfer", "error", err)
 		return fmt.Errorf("failed to initialize data transfer: %w", err)
 	}
-
-	_, err = writer.Write([]byte(msg))
-	if err != nil {
-		logger.Error(ctx, "failed to write message", "error", err)
+	if _, err = w.Write([]byte(msg)); err != nil {
 		return fmt.Errorf("failed to write message: %w", err)
 	}
-
-	err = writer.Close()
-	if err != nil {
-		logger.Error(ctx, "failed to close data writer", "error", err)
+	if err = w.Close(); err != nil {
 		return fmt.Errorf("failed to close data writer: %w", err)
 	}
 
-	logger.Info(ctx, "email sent successfully via STARTTLS", "to", strings.Join(data.To, ", "), "subject", data.Subject, "mailer", m.mailerType)
+	logger.Info(ctx, "email sent (STARTTLS)", "host", m.host, "port", m.port, "to", strings.Join(data.To, ", "), "subject", data.Subject)
+	return nil
+}
+
+// Implicit TLS on 465, with AUTH.
+func (m *Mailer) sendWithTLS(ctx context.Context, data EmailData) error {
+	msg := m.buildMessage(data)
+	addr := fmt.Sprintf("%s:%s", m.host, m.port)
+
+	conn, err := tls.Dial("tcp", addr, &tls.Config{ServerName: m.host})
+	if err != nil {
+		logger.Error(ctx, "tls dial (implicit) failed", "error", err)
+		return fmt.Errorf("tls dial: %w", err)
+	}
+	defer conn.Close()
+
+	c, err := smtp.NewClient(conn, m.host)
+	if err != nil {
+		logger.Error(ctx, "smtp client (implicit) failed", "error", err)
+		return fmt.Errorf("smtp client: %w", err)
+	}
+	defer c.Quit()
+
+	if m.username != "" && m.password != "" {
+		if err := c.Auth(smtp.PlainAuth("", m.username, m.password, m.host)); err != nil {
+			logger.Error(ctx, "smtp auth (implicit) failed", "error", err)
+			return fmt.Errorf("smtp auth: %w", err)
+		}
+	}
+
+	if err := c.Mail(m.from); err != nil {
+		return fmt.Errorf("failed to set sender: %w", err)
+	}
+	for _, rcpt := range data.To {
+		if err := c.Rcpt(rcpt); err != nil {
+			return fmt.Errorf("failed to add recipient %s: %w", rcpt, err)
+		}
+	}
+
+	w, err := c.Data()
+	if err != nil {
+		return fmt.Errorf("failed to initialize data transfer: %w", err)
+	}
+	if _, err = w.Write([]byte(msg)); err != nil {
+		return fmt.Errorf("failed to write message: %w", err)
+	}
+	if err = w.Close(); err != nil {
+		return fmt.Errorf("failed to close data writer: %w", err)
+	}
+
+	logger.Info(ctx, "email sent (implicit TLS)", "host", m.host, "port", m.port, "to", strings.Join(data.To, ", "), "subject", data.Subject)
 	return nil
 }
 
 func (m *Mailer) buildMessage(data EmailData) string {
 	var buf bytes.Buffer
-
 	buf.WriteString(fmt.Sprintf("From: %s\r\n", m.from))
 	buf.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(data.To, ", ")))
 	buf.WriteString(fmt.Sprintf("Subject: %s\r\n", data.Subject))
 	buf.WriteString("MIME-Version: 1.0\r\n")
-
 	if data.IsHTML {
 		buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
 	} else {
 		buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	}
-
 	buf.WriteString("\r\n")
 	buf.WriteString(data.Body)
-
 	return buf.String()
 }
 

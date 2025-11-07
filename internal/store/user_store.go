@@ -17,6 +17,7 @@ type User struct {
 	Email        string
 	PasswordHash string
 	Role         *string
+	IsVerified   bool
 	IsActive     bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
@@ -29,6 +30,8 @@ type UserStore interface {
 	UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error
 	ActivateUser(ctx context.Context, id uuid.UUID) error
 	DeactivateUser(ctx context.Context, id uuid.UUID) error
+	SetVerified(ctx context.Context, id uuid.UUID, verified bool) error
+	VerifyEmailExists(ctx context.Context, email string) (bool, error)
 }
 
 type PostgresUserStore struct {
@@ -51,26 +54,50 @@ func isUniqueViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
-// CreateUser inserts user; default role -> 'rider' if nil or "".
+// CreateUser inserts a new user.
+// - role: if nil/empty => defaults to 'rider' (enum cast is done in SQL)
+// - is_verified/is_active: both start false; flip in flows as needed
 func (p *PostgresUserStore) CreateUser(ctx context.Context, u *User) (*User, error) {
 	const q = `
-INSERT INTO users (email, password_hash, role, is_active, created_at, updated_at)
-VALUES (lower(btrim($1)), $2, COALESCE(NULLIF($3, ''), 'rider'), false, now(), now())
-RETURNING id, email, password_hash, role, is_active, created_at, updated_at;
+INSERT INTO users (
+  email,
+  password_hash,
+  role,
+  is_verified,
+  is_active,
+  created_at,
+  updated_at
+)
+VALUES (
+  lower(btrim($1)),
+  $2,
+  COALESCE(NULLIF($3, '')::user_role, 'rider'::user_role),
+  false,
+  false,
+  now(),
+  now()
+)
+RETURNING id, email, password_hash, role, is_verified, is_active, created_at, updated_at;
 `
-	var out User
-	var roleStr string
-	// u.Role may be nil; pass nil or *u.Role safely:
+
 	var roleArg any
 	if u.Role == nil {
-		roleArg = nil
+		roleArg = nil // NULL -> COALESCE to 'rider'
 	} else {
 		roleArg = *u.Role
 	}
 
+	var out User
+	var roleStr string
 	if err := p.pool.QueryRow(ctx, q, normalizeEmail(u.Email), u.PasswordHash, roleArg).Scan(
-		&out.ID, &out.Email, &out.PasswordHash, &roleStr,
-		&out.IsActive, &out.CreatedAt, &out.UpdatedAt,
+		&out.ID,
+		&out.Email,
+		&out.PasswordHash,
+		&roleStr,
+		&out.IsVerified,
+		&out.IsActive,
+		&out.CreatedAt,
+		&out.UpdatedAt,
 	); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrDuplicateEmail
@@ -83,7 +110,7 @@ RETURNING id, email, password_hash, role, is_active, created_at, updated_at;
 
 func (p *PostgresUserStore) GetByEmail(ctx context.Context, email string) (*User, error) {
 	const q = `
-SELECT id, email, password_hash, role, is_active, created_at, updated_at
+SELECT id, email, password_hash, role, is_verified, is_active, created_at, updated_at
 FROM users
 WHERE lower(btrim(email)) = lower(btrim($1))
 LIMIT 1;
@@ -91,7 +118,14 @@ LIMIT 1;
 	var u User
 	var roleStr string
 	if err := p.pool.QueryRow(ctx, q, normalizeEmail(email)).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &roleStr, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID,
+		&u.Email,
+		&u.PasswordHash,
+		&roleStr,
+		&u.IsVerified,
+		&u.IsActive,
+		&u.CreatedAt,
+		&u.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -104,7 +138,7 @@ LIMIT 1;
 
 func (p *PostgresUserStore) GetByID(ctx context.Context, id uuid.UUID) (*User, error) {
 	const q = `
-SELECT id, email, password_hash, role, is_active, created_at, updated_at
+SELECT id, email, password_hash, role, is_verified, is_active, created_at, updated_at
 FROM users
 WHERE id = $1
 LIMIT 1;
@@ -112,7 +146,14 @@ LIMIT 1;
 	var u User
 	var roleStr string
 	if err := p.pool.QueryRow(ctx, q, id).Scan(
-		&u.ID, &u.Email, &u.PasswordHash, &roleStr, &u.IsActive, &u.CreatedAt, &u.UpdatedAt,
+		&u.ID,
+		&u.Email,
+		&u.PasswordHash,
+		&roleStr,
+		&u.IsVerified,
+		&u.IsActive,
+		&u.CreatedAt,
+		&u.UpdatedAt,
 	); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -124,7 +165,11 @@ LIMIT 1;
 }
 
 func (p *PostgresUserStore) UpdatePassword(ctx context.Context, id uuid.UUID, newHash string) error {
-	const q = `UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1;`
+	const q = `
+UPDATE users
+SET password_hash = $2, updated_at = now()
+WHERE id = $1;
+`
 	tag, err := p.pool.Exec(ctx, q, id, newHash)
 	if err != nil {
 		return err
@@ -136,7 +181,11 @@ func (p *PostgresUserStore) UpdatePassword(ctx context.Context, id uuid.UUID, ne
 }
 
 func (p *PostgresUserStore) ActivateUser(ctx context.Context, id uuid.UUID) error {
-	const q = `UPDATE users SET is_active = true, updated_at = now() WHERE id = $1;`
+	const q = `
+UPDATE users
+SET is_active = true, updated_at = now()
+WHERE id = $1;
+`
 	tag, err := p.pool.Exec(ctx, q, id)
 	if err != nil {
 		return err
@@ -148,7 +197,11 @@ func (p *PostgresUserStore) ActivateUser(ctx context.Context, id uuid.UUID) erro
 }
 
 func (p *PostgresUserStore) DeactivateUser(ctx context.Context, id uuid.UUID) error {
-	const q = `UPDATE users SET is_active = false, updated_at = now() WHERE id = $1;`
+	const q = `
+UPDATE users
+SET is_active = false, updated_at = now()
+WHERE id = $1;
+`
 	tag, err := p.pool.Exec(ctx, q, id)
 	if err != nil {
 		return err
@@ -157,6 +210,35 @@ func (p *PostgresUserStore) DeactivateUser(ctx context.Context, id uuid.UUID) er
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (p *PostgresUserStore) SetVerified(ctx context.Context, id uuid.UUID, verified bool) error {
+	const q = `
+UPDATE users
+SET is_verified = $2, updated_at = now()
+WHERE id = $1;
+`
+	tag, err := p.pool.Exec(ctx, q, id, verified)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (p *PostgresUserStore) VerifyEmailExists(ctx context.Context, email string) (bool, error) {
+	const q = `
+SELECT EXISTS(
+  SELECT 1 FROM users WHERE lower(btrim(email)) = lower(btrim($1))
+);
+`
+	var exists bool
+	if err := p.pool.QueryRow(ctx, q, normalizeEmail(email)).Scan(&exists); err != nil {
+		return false, err
+	}
+	return exists, nil
 }
 
 var _ UserStore = (*PostgresUserStore)(nil)

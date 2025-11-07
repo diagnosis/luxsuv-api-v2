@@ -29,6 +29,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 
 	userStore := store.NewPostgresUserStore(pool)
 	refreshTokenStore := store.NewPostgresRefreshTokenStore(pool)
+	authVerificationTokenStore := store.NewAuthVerificationStore(pool)
 	accessSecret := []byte(os.Getenv("JWT_ACCESS_SECRET"))
 	refreshSecret := []byte(os.Getenv("JWT_REFRESH_SECRET"))
 	issuer := os.Getenv("TOKEN_ISSUER")
@@ -53,7 +54,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 		logger.Warn(ctx, "SMTP mailer not configured, email functionality will be disabled")
 	}
 
-	userHandler := api.NewUserHandler(userStore, signer, refreshTokenStore)
+	userHandler := api.NewUserHandler(userStore, signer, refreshTokenStore, authVerificationTokenStore, mailService)
 
 	logger.Info(ctx, "application initialized successfully")
 
