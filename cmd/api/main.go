@@ -13,6 +13,7 @@ import (
 	"github.com/diagnosis/luxsuv-api-v2/internal/logger"
 	"github.com/diagnosis/luxsuv-api-v2/internal/routes"
 	"github.com/diagnosis/luxsuv-api-v2/internal/store"
+
 	"github.com/diagnosis/luxsuv-api-v2/migrations"
 )
 

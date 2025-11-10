@@ -10,6 +10,7 @@ import (
 	"github.com/diagnosis/luxsuv-api-v2/internal/mailer"
 	"github.com/diagnosis/luxsuv-api-v2/internal/secure"
 	"github.com/diagnosis/luxsuv-api-v2/internal/store"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -19,6 +20,7 @@ type Application struct {
 	Mailer        *mailer.Mailer
 	HealthHandler *api.HealthHandler
 	UserHandler   *api.UserHandler
+	AdminHandler  *api.AdminHandler
 }
 
 func NewApplication(pool *pgxpool.Pool) (*Application, error) {
@@ -30,6 +32,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 	userStore := store.NewPostgresUserStore(pool)
 	refreshTokenStore := store.NewPostgresRefreshTokenStore(pool)
 	authVerificationTokenStore := store.NewAuthVerificationStore(pool)
+	driverAppStore := store.NewDriverApplicationStore(pool)
 	accessSecret := []byte(os.Getenv("JWT_ACCESS_SECRET"))
 	refreshSecret := []byte(os.Getenv("JWT_REFRESH_SECRET"))
 	issuer := os.Getenv("TOKEN_ISSUER")
@@ -40,7 +43,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 		return nil, secure.ErrSecretsInvalid
 	}
 
-	signer, err := secure.NewSigner(issuer, audience, accessSecret, refreshSecret, 15*time.Second, 7*24*time.Hour)
+	signer, err := secure.NewSigner(issuer, audience, accessSecret, refreshSecret, 15*time.Minute, 7*24*time.Hour)
 	if err != nil {
 		logger.Error(ctx, "failed to create JWT signer", "error", err)
 		return nil, err
@@ -54,8 +57,8 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 		logger.Warn(ctx, "SMTP mailer not configured, email functionality will be disabled")
 	}
 
-	userHandler := api.NewUserHandler(userStore, signer, refreshTokenStore, authVerificationTokenStore, mailService)
-
+	userHandler := api.NewUserHandler(userStore, signer, refreshTokenStore, authVerificationTokenStore, mailService, driverAppStore)
+	adminHandler := api.NewAdminHandler(userStore, driverAppStore)
 	logger.Info(ctx, "application initialized successfully")
 
 	return &Application{
@@ -64,6 +67,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 		Mailer:        mailService,
 		HealthHandler: healthHandler,
 		UserHandler:   userHandler,
+		AdminHandler:  adminHandler,
 	}, nil
 
 }

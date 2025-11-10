@@ -17,22 +17,39 @@ import (
 )
 
 type UserHandler struct {
-	UserStore             store.UserStore
-	Signer                *secure.Signer
-	RefreshStore          store.RefreshStore
-	AuthVerificationStore store.AuthVerificationStore
-	Mailer                *mailer.Mailer
+	UserStore              store.UserStore
+	Signer                 *secure.Signer
+	RefreshStore           store.RefreshStore
+	AuthVerificationStore  store.AuthVerificationStore
+	Mailer                 *mailer.Mailer
+	DriverApplicationStore store.DriverApplicationStore
 }
 
-func NewUserHandler(us store.UserStore, signer *secure.Signer, rs store.RefreshStore, avs store.AuthVerificationStore, mailer *mailer.Mailer) *UserHandler {
-	return &UserHandler{us, signer, rs, avs, mailer}
+func NewUserHandler(
+	us store.UserStore,
+	signer *secure.Signer,
+	rs store.RefreshStore,
+	avs store.AuthVerificationStore,
+	m *mailer.Mailer,
+	das store.DriverApplicationStore,
+) *UserHandler {
+	return &UserHandler{
+		UserStore:              us,
+		Signer:                 signer,
+		RefreshStore:           rs,
+		AuthVerificationStore:  avs,
+		Mailer:                 m,
+		DriverApplicationStore: das,
+	}
 }
+
+// ---------- LOGIN ----------
 
 func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	logger.Debug(ctx, "login attempt started")
 
-	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctxTO, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var body struct {
@@ -52,14 +69,12 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.ToLower(strings.TrimSpace(body.Email))
 	pw := strings.TrimSpace(body.Password)
-
 	if len(email) < 4 || len(pw) < 8 {
-		logger.Warn(ctx, "login validation failed", "email_len", len(email), "pw_len", len(pw))
 		helper.RespondError(w, r, apperror.BadRequest("Email must be at least 4 characters and password at least 8 characters"))
 		return
 	}
 
-	u, err := h.UserStore.GetByEmail(ctxTimeout, email)
+	u, err := h.UserStore.GetByEmail(ctxTO, email)
 	if err != nil {
 		logger.Warn(ctx, "user lookup failed", "email", email, "error", err)
 		logger.Audit(ctx, logger.AuditUserLogin, nil, helper.ClientIP(r), r.UserAgent(), false, map[string]any{
@@ -70,6 +85,10 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !u.IsVerified {
+		helper.RespondError(w, r, apperror.BadRequest("Email not verified"))
+		return
+	}
 	if !u.IsActive {
 		logger.Warn(ctx, "inactive account login attempt", "user_id", u.ID)
 		logger.Audit(ctx, logger.AuditUserLogin, &u.ID, helper.ClientIP(r), r.UserAgent(), false, map[string]any{
@@ -77,10 +96,6 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			"reason": "account_inactive",
 		})
 		helper.RespondError(w, r, apperror.AccountInactive())
-		return
-	}
-	if !u.IsVerified {
-		helper.RespondError(w, r, apperror.BadRequest("Email not verified"))
 		return
 	}
 
@@ -96,31 +111,30 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 
 	accessToken, _, err := h.Signer.MintAccess(u.ID, helper.DerefOrString(u.Role, "rider"))
 	if err != nil {
-		helper.RespondError(w, r, apperror.InternalError("Failed to generate access token", err))
 		logger.Error(ctx, "failed to mint access token", "user_id", u.ID, "error", err)
+		helper.RespondError(w, r, apperror.InternalError("Failed to generate access token", err))
 		return
 	}
 
 	ua := r.UserAgent()
 	ip := helper.ClientIPNet(r)
-	refreshTokenPlain, refreshRec, err := h.RefreshStore.Create(ctxTimeout, u.ID, ua, ip, 7*24*time.Hour, time.Now())
+	refreshTokenPlain, refreshRec, err := h.RefreshStore.Create(ctxTO, u.ID, ua, ip, 7*24*time.Hour, time.Now())
 	if err != nil {
-		helper.RespondError(w, r, apperror.InternalError("Failed to create refresh token", err))
 		logger.Error(ctx, "failed to create refresh token", "user_id", u.ID, "error", err)
+		helper.RespondError(w, r, apperror.InternalError("Failed to create refresh token", err))
 		return
 	}
 
 	logger.Info(ctx, "user logged in successfully", "user_id", u.ID, "refresh_token_id", refreshRec.ID)
-	logger.Audit(ctx, logger.AuditUserLogin, &u.ID, helper.ClientIP(r), r.UserAgent(), true, map[string]any{
-		"email": email,
-	})
+	logger.Audit(ctx, logger.AuditUserLogin, &u.ID, helper.ClientIP(r), r.UserAgent(), true, map[string]any{"email": email})
+
 	http.SetCookie(w, &http.Cookie{
 		Name:     "refresh_token",
 		Value:    refreshTokenPlain,
 		Path:     "/",
 		HttpOnly: true,
 		Secure:   strings.EqualFold(os.Getenv("APP_ENV"), "production"),
-		SameSite: http.SameSiteLaxMode,
+		SameSite: http.SameSiteLaxMode, // consider Strict in prod if UX allows
 		MaxAge:   int((7 * 24 * time.Hour).Seconds()),
 	})
 
@@ -134,28 +148,31 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 			"role":  helper.DerefOrString(u.Role, "rider"),
 		},
 	}
-
 	helper.RespondJSON(w, r, http.StatusOK, response)
 }
+
+// ---------- REGISTER (rider/driver) ----------
+
 func (h *UserHandler) HandleRiderRegister(w http.ResponseWriter, r *http.Request) {
 	h.handleRegister(w, r, "rider")
 }
+
 func (h *UserHandler) HandleDriverRegister(w http.ResponseWriter, r *http.Request) {
 	h.handleRegister(w, r, "driver")
 }
 
-// handle driver registration
 func (h *UserHandler) handleRegister(w http.ResponseWriter, r *http.Request, role string) {
 	ctx := r.Context()
 	logger.Info(ctx, "register attempt started")
 
-	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	ctxTO, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	var body struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -173,7 +190,7 @@ func (h *UserHandler) handleRegister(w http.ResponseWriter, r *http.Request, rol
 		return
 	}
 
-	exists, err := h.UserStore.VerifyEmailExists(ctxTimeout, email)
+	exists, err := h.UserStore.VerifyEmailExists(ctxTO, email)
 	if err != nil {
 		helper.RespondError(w, r, apperror.InternalError("Internal error", err))
 		return
@@ -193,9 +210,9 @@ func (h *UserHandler) handleRegister(w http.ResponseWriter, r *http.Request, rol
 		Email:        email,
 		PasswordHash: pwHash,
 		Role:         &role, // "rider" or "driver"
-		// IsActive/IsVerified default to false in DB
+		// is_verified / is_active default to false in DB
 	}
-	u, err := h.UserStore.CreateUser(ctxTimeout, ureq)
+	u, err := h.UserStore.CreateUser(ctxTO, ureq)
 	if err != nil {
 		logger.Error(ctx, "create user failed", "error", err)
 		helper.RespondError(w, r, apperror.InternalError("Internal error", err))
@@ -217,40 +234,43 @@ func (h *UserHandler) handleRegister(w http.ResponseWriter, r *http.Request, rol
 		return
 	}
 
-	rawToken, _, err := h.AuthVerificationStore.Create(ctxTimeout, u.ID, purpose, ua, ip, 30*time.Minute, time.Now())
+	rawToken, _, err := h.AuthVerificationStore.Create(ctxTO, u.ID, purpose, ua, ip, 30*time.Minute, time.Now())
 	if err != nil {
 		logger.Error(ctx, "create verification token failed", "error", err)
 		helper.RespondError(w, r, apperror.InternalError("Internal error", err))
 		return
 	}
 
-	// Build verification link to your API endpoint
-	base := strings.TrimRight(os.Getenv("APP_DOMAIN"), "/")
+	// Build verification URL (robust against missing scheme)
+	base := strings.TrimRight(os.Getenv("BASE_URL"), "/")
 	if base == "" {
-		base = "http://localhost:8081" // your API port in dev
+		base = "http://localhost:8081"
+	} else if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "http://" + base
 	}
 	verifyURL := base + "/api/v1/auth/verify?token=" + rawToken + "&purpose=" + string(purpose)
 
-	// Send email (keep welcome optional)
-	_ = h.Mailer.SendTemplate(ctx, []string{u.Email}, "Confirm your account",
-		`<p>Welcome to LuxSUV!</p>
-         <p>Please confirm your email by clicking the link below:</p>
-         <p><a href="{{.Link}}">{{.Link}}</a></p>`,
-		map[string]any{"Link": verifyURL},
-	)
+	// Send verification email (don't block user creation on SMTP failure)
+	if err := mailer.SendVerificationEmail(ctx, h.Mailer, u.Email, "", role, verifyURL, "30 minutes"); err != nil {
+		logger.Warn(ctx, "send verification email failed", "error", err)
+	}
 
 	helper.RespondMessage(w, r, http.StatusCreated, "Registration received. Check your email to confirm.")
 }
 
-// verify email handler
+// ---------- VERIFY EMAIL ----------
+
 func (h *UserHandler) HandleVerifyEmail(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctxTO, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
 	q := r.URL.Query()
 	raw := strings.TrimSpace(q.Get("token"))
 	purposeStr := strings.TrimSpace(q.Get("purpose"))
 
-	if raw == "" || purposeStr == "" {
-		helper.RespondError(w, r, apperror.BadRequest("missing token or purpose"))
+	// quick sanity checks (32 random bytes -> 64 hex chars typically)
+	if raw == "" || len(raw) < 40 || len(raw) > 200 || purposeStr == "" {
+		helper.RespondError(w, r, apperror.BadRequest("invalid token/purpose"))
 		return
 	}
 
@@ -265,29 +285,128 @@ func (h *UserHandler) HandleVerifyEmail(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Consume token
-	tok, err := h.AuthVerificationStore.ValidateAndConsume(ctx, raw, purpose, time.Now())
+	// Atomically validate & consume token
+	tok, err := h.AuthVerificationStore.ValidateAndConsume(ctxTO, raw, purpose, time.Now())
 	if err != nil {
 		helper.RespondError(w, r, apperror.BadRequest("invalid or expired token"))
 		return
 	}
 
-	// Mark user verified
-	if err := h.UserStore.SetVerified(ctx, tok.UserID, true); err != nil {
+	// Mark verified
+	if err := h.UserStore.SetVerified(ctxTO, tok.UserID, true); err != nil {
 		helper.RespondError(w, r, apperror.InternalError("failed to mark verified", err))
 		return
 	}
 
-	// Rider: auto-activate; Driver: leave inactive & create/persist driver application (next step)
+	// Next steps per purpose
 	switch purpose {
 	case store.PurposeRiderConfirm:
-		if err := h.UserStore.ActivateUser(ctx, tok.UserID); err != nil {
+		// auto-activate rider
+		if err := h.UserStore.ActivateUser(ctxTO, tok.UserID); err != nil {
 			helper.RespondError(w, r, apperror.InternalError("failed to activate rider", err))
 			return
 		}
+		logger.Audit(ctxTO, "user_email_verified", &tok.UserID, helper.ClientIP(r), r.UserAgent(), true, map[string]any{"role": "rider"})
 		helper.RespondMessage(w, r, http.StatusOK, "Email verified. Your rider account is now active.")
+
 	case store.PurposeDriverConfirm:
-		// TODO: ensure driver_applications row exists (pending), and notify admins via email.
+		// create driver application (make Create idempotent on unique conflict)
+		appRec, err := h.DriverApplicationStore.Create(ctxTO, tok.UserID, "driver email verified", time.Now().UTC())
+		if err != nil {
+			logger.Error(ctxTO, "create driver application failed", "error", err)
+			helper.RespondError(w, r, apperror.InternalError("failed to create application", err))
+			return
+		}
+
+		// notify admin (best-effort)
+		adminLink := os.Getenv("ADMIN_CONSOLE_URL")
+		if adminLink != "" {
+			adminLink = strings.TrimRight(adminLink, "/") + "/driver-applications/" + appRec.ID.String()
+		}
+
+		if user, err := h.UserStore.GetByID(ctxTO, tok.UserID); err == nil {
+			_ = mailer.SendDriverAdminAlert(
+				ctxTO,
+				h.Mailer,
+				[]string{"info@luxsuv.us"},
+				appRec.ID.String(), // <-- app id
+				user.ID.String(),   // keep user id if you want both
+				user.Email,
+				time.Now().UTC().Format(time.RFC3339),
+				os.Getenv("ADMIN_CONSOLE_URL"),
+			)
+		}
+		logger.Audit(ctxTO, "user_email_verified", &tok.UserID, helper.ClientIP(r), r.UserAgent(), true, map[string]any{"role": "driver"})
 		helper.RespondMessage(w, r, http.StatusOK, "Email verified. Your driver application is pending admin review.")
 	}
+}
+
+// handle forgot and reset password
+func (h *UserHandler) HandleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	var body struct {
+		Email string `json:"email"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&body); err != nil {
+		// Don’t leak details; respond the same
+		helper.RespondJSON(w, r, http.StatusAccepted, "If email exists, a reset link has been sent")
+		return
+	}
+	defer r.Body.Close()
+
+	email := strings.ToLower(strings.TrimSpace(body.Email))
+	respondAccepted := func() {
+		helper.RespondJSON(w, r, http.StatusAccepted, "If email exists, a reset link has been sent")
+	}
+
+	if email == "" {
+		respondAccepted()
+		return
+	}
+
+	// Look up user (do not leak existence)
+	u, err := h.UserStore.GetByEmail(ctx, email)
+	if err != nil {
+		respondAccepted()
+		return
+	}
+
+	// Restrict admins from using “forgot password” self-service
+	role := strings.ToLower(helper.DerefOrString(u.Role, "rider"))
+	if role == "admin" || role == "super_admin" {
+		logger.Warn(ctx, "forgot-password attempted for admin class account", "email", email)
+		_ = mailer.SendAlertAttemptAdminPasswordRecovery(ctx, h.Mailer, u.Email, helper.ClientIP(r), r.UserAgent())
+		// TODO: add IP throttling / temporary ban here
+		respondAccepted()
+		return
+	}
+
+	// Issue token
+	ua := r.UserAgent()
+	ip := helper.ClientIPNet(r)
+	raw, _, err := h.AuthVerificationStore.Create(ctx, u.ID, store.PurposePasswordReset, ua, ip, 15*time.Minute, time.Now().UTC())
+	if err != nil {
+		// Don’t leak failure
+		respondAccepted()
+		return
+	}
+
+	// Build reset URL
+	base := strings.TrimRight(os.Getenv("APP_DOMAIN"), "/")
+	if base == "" {
+		base = "http://localhost:8081"
+	} else if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {
+		base = "http://" + base
+	}
+	resetURL := base + "/api/v1/auth/reset?token=" + raw
+
+	// Send email (best-effort)
+	_ = mailer.SendPasswordResetEmail(ctx, h.Mailer, u.Email, u.Email, resetURL)
+
+	respondAccepted()
 }

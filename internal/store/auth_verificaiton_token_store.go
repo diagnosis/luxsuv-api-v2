@@ -18,6 +18,7 @@ type AVPurpose string
 const (
 	PurposeRiderConfirm  AVPurpose = "rider_confirm"
 	PurposeDriverConfirm AVPurpose = "driver_confirm"
+	PurposePasswordReset AVPurpose = "password_reset"
 )
 
 var (
@@ -154,7 +155,8 @@ func (p *PostgresAuthVerificationStore) FindByHash(ctx context.Context, hash str
 
 // --- ValidateAndConsume (atomic, prevents replay) ---
 
-func (p *PostgresAuthVerificationStore) ValidateAndConsume(ctx context.Context, hash string, purpose AVPurpose, now time.Time) (*AuthVerificationToken, error) {
+func (p *PostgresAuthVerificationStore) ValidateAndConsume(ctx context.Context, raw string, purpose AVPurpose, now time.Time) (*AuthVerificationToken, error) {
+	hash := hashHex(raw)
 	const q = `
 		WITH consumed AS (
 		  UPDATE auth_verification_tokens

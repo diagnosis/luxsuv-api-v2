@@ -65,3 +65,37 @@ migrate-prod: ## goose up (prod)
 
 up-mailpit: ## open Mailpit UI (if needed)
 	@open http://localhost:8025 2>/dev/null || true
+
+.PHONY: db-clean-test-dev db-clean-test-stage db-clean-test-prod
+
+# Delete test users (dev). FK cascades will clean related rows.
+db-clean-test-dev:
+	infisical run --env=dev -- bash -lc 'psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -c "\
+		DELETE FROM users \
+		WHERE email ILIKE '\''test-%'\'' OR email ILIKE '\''%@example.test'\''; \
+	"'
+
+db-clean-test-stage:
+	infisical run --env=stage -- bash -lc 'psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -c "\
+		DELETE FROM users \
+		WHERE email ILIKE '\''test-%'\'' OR email ILIKE '\''%@example.test'\''; \
+	"'
+
+db-clean-test-prod:
+	infisical run --env=prod -- bash -lc 'psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -c "\
+		DELETE FROM users \
+		WHERE email ILIKE '\''test-%'\'' OR email ILIKE '\''%@example.test'\''; \
+	"'
+
+.PHONY: mailpit-purge db-count-test
+
+# Nuke dev emails in Mailpit (handy between runs)
+mailpit-purge:
+	curl -s -X DELETE http://localhost:8025/api/v1/messages >/dev/null || true
+
+# See how many rows you'd delete
+db-count-test:
+	infisical run --env=dev -- bash -lc 'psql "$$DATABASE_URL" -tAc "\
+		SELECT count(*) FROM users \
+		WHERE email ILIKE '\''test-%'\'' OR email ILIKE '\''%@example.test'\''; \
+	"'
