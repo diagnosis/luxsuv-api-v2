@@ -47,10 +47,14 @@ func (h *AdminHandler) HandleCreateUserWithRole(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	email := strings.ToLower(strings.TrimSpace(body.Email))
+	email := helper.SanitizeEmail(body.Email)
 	role := strings.ToLower(strings.TrimSpace(body.Role))
-	if len(email) < 4 || len(body.Password) < 8 {
-		helper.RespondError(w, r, apperror.BadRequest("email >= 4, password >= 8"))
+	if !helper.IsValidEmail(email) {
+		helper.RespondError(w, r, apperror.BadRequest("Invalid email address"))
+		return
+	}
+	if !helper.IsValidPassword(body.Password) {
+		helper.RespondError(w, r, apperror.BadRequest("Password must be at least 8 characters"))
 		return
 	}
 	switch role {
@@ -112,7 +116,7 @@ func (h *AdminHandler) HandleSetUserRole(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.UserStore.(*store.PostgresUserStore).SetUserRole(ctx, userID, role); err != nil {
+	if err := h.UserStore.SetUserRole(ctx, userID, role); err != nil {
 		helper.RespondError(w, r, apperror.InternalError("set role failed", err))
 		return
 	}

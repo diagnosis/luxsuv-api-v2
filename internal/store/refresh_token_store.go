@@ -197,6 +197,9 @@ func (s *PostgresRefreshTokenStore) Rotate(ctx context.Context, oldID uuid.UUID,
 }
 
 func (s *PostgresRefreshTokenStore) FindByHash(ctx context.Context, hash string) (*RefreshToken, error) {
+	if hash == "" {
+		return nil, ErrNotFound
+	}
 	const q = `
 		SELECT id, user_id, token_hash, issued_at, expires_at, revoked_at, user_agent, ip
 		FROM auth_refresh_tokens

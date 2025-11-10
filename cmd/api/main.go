@@ -96,5 +96,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	if appl.CleanupJob != nil {
+		appl.CleanupJob.Stop()
+		logger.Info(ctx, "cleanup job stopped")
+	}
+
 	logger.Info(ctx, "server stopped successfully")
 }

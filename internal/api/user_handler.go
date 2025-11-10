@@ -65,12 +65,15 @@ func (h *UserHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 		helper.RespondError(w, r, apperror.BadRequest("Invalid request body"))
 		return
 	}
-	defer r.Body.Close()
 
-	email := strings.ToLower(strings.TrimSpace(body.Email))
+	email := helper.SanitizeEmail(body.Email)
 	pw := strings.TrimSpace(body.Password)
-	if len(email) < 4 || len(pw) < 8 {
-		helper.RespondError(w, r, apperror.BadRequest("Email must be at least 4 characters and password at least 8 characters"))
+	if !helper.IsValidEmail(email) {
+		helper.RespondError(w, r, apperror.BadRequest("Invalid email address"))
+		return
+	}
+	if !helper.IsValidPassword(pw) {
+		helper.RespondError(w, r, apperror.BadRequest("Password must be at least 8 characters"))
 		return
 	}
 
@@ -181,12 +184,15 @@ func (h *UserHandler) handleRegister(w http.ResponseWriter, r *http.Request, rol
 		helper.RespondError(w, r, apperror.BadRequest("Invalid request body"))
 		return
 	}
-	defer r.Body.Close()
 
-	email := strings.ToLower(strings.TrimSpace(body.Email))
+	email := helper.SanitizeEmail(body.Email)
 	pw := strings.TrimSpace(body.Password)
-	if len(email) < 4 || len(pw) < 8 {
-		helper.RespondError(w, r, apperror.BadRequest("Email must be ≥4 chars and password ≥8 chars"))
+	if !helper.IsValidEmail(email) {
+		helper.RespondError(w, r, apperror.BadRequest("Invalid email address"))
+		return
+	}
+	if !helper.IsValidPassword(pw) {
+		helper.RespondError(w, r, apperror.BadRequest("Password must be at least 8 characters"))
 		return
 	}
 
@@ -353,18 +359,17 @@ func (h *UserHandler) HandleForgotPassword(w http.ResponseWriter, r *http.Reques
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&body); err != nil {
-		// Don’t leak details; respond the same
+		// Don't leak details; respond the same
 		helper.RespondJSON(w, r, http.StatusAccepted, "If email exists, a reset link has been sent")
 		return
 	}
-	defer r.Body.Close()
 
-	email := strings.ToLower(strings.TrimSpace(body.Email))
+	email := helper.SanitizeEmail(body.Email)
 	respondAccepted := func() {
 		helper.RespondJSON(w, r, http.StatusAccepted, "If email exists, a reset link has been sent")
 	}
 
-	if email == "" {
+	if !helper.IsValidEmail(email) {
 		respondAccepted()
 		return
 	}
@@ -397,7 +402,7 @@ func (h *UserHandler) HandleForgotPassword(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Build reset URL
-	base := strings.TrimRight(os.Getenv("APP_DOMAIN"), "/")
+	base := strings.TrimRight(os.Getenv("BASE_URL"), "/")
 	if base == "" {
 		base = "http://localhost:8081"
 	} else if !strings.HasPrefix(base, "http://") && !strings.HasPrefix(base, "https://") {

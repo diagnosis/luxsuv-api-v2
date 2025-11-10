@@ -104,12 +104,7 @@ func RateLimit(rl *RateLimiter) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 
-			ip := r.RemoteAddr
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-				ip = xff
-			} else if xri := r.Header.Get("X-Real-IP"); xri != "" {
-				ip = xri
-			}
+			ip := helper.ClientIP(r)
 
 			if !rl.allow(ip) {
 				logger.Warn(ctx, "rate limit exceeded", "ip", ip)

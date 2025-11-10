@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/diagnosis/luxsuv-api-v2/internal/api"
+	"github.com/diagnosis/luxsuv-api-v2/internal/jobs"
 	"github.com/diagnosis/luxsuv-api-v2/internal/logger"
 	"github.com/diagnosis/luxsuv-api-v2/internal/mailer"
 	"github.com/diagnosis/luxsuv-api-v2/internal/secure"
@@ -21,6 +22,7 @@ type Application struct {
 	HealthHandler *api.HealthHandler
 	UserHandler   *api.UserHandler
 	AdminHandler  *api.AdminHandler
+	CleanupJob    *jobs.CleanupJob
 }
 
 func NewApplication(pool *pgxpool.Pool) (*Application, error) {
@@ -59,6 +61,11 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 
 	userHandler := api.NewUserHandler(userStore, signer, refreshTokenStore, authVerificationTokenStore, mailService, driverAppStore)
 	adminHandler := api.NewAdminHandler(userStore, driverAppStore)
+
+	cleanupJob := jobs.NewCleanupJob(refreshTokenStore, authVerificationTokenStore, 6*time.Hour)
+	cleanupJob.Start()
+	logger.Info(ctx, "cleanup job started")
+
 	logger.Info(ctx, "application initialized successfully")
 
 	return &Application{
@@ -68,6 +75,7 @@ func NewApplication(pool *pgxpool.Pool) (*Application, error) {
 		HealthHandler: healthHandler,
 		UserHandler:   userHandler,
 		AdminHandler:  adminHandler,
+		CleanupJob:    cleanupJob,
 	}, nil
 
 }

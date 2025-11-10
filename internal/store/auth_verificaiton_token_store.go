@@ -156,6 +156,9 @@ func (p *PostgresAuthVerificationStore) FindByHash(ctx context.Context, hash str
 // --- ValidateAndConsume (atomic, prevents replay) ---
 
 func (p *PostgresAuthVerificationStore) ValidateAndConsume(ctx context.Context, raw string, purpose AVPurpose, now time.Time) (*AuthVerificationToken, error) {
+	if raw == "" {
+		return nil, ErrInvalidToken
+	}
 	hash := hashHex(raw)
 	const q = `
 		WITH consumed AS (
