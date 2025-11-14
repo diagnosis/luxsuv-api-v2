@@ -215,3 +215,43 @@ func (h *AdminHandler) HandleReviewDriverApplication(w http.ResponseWriter, r *h
 		})
 	}
 }
+func (h *AdminHandler) HandleGetDriverApplicationByUserID(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	uid, err := uuid.Parse(chi.URLParam(r, "userID"))
+	if err != nil {
+		helper.RespondError(w, r, apperror.BadRequest("invalid user id"))
+		return
+	}
+
+	da, err := h.DriverApplicationStore.GetByUserID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			helper.RespondError(w, r, apperror.NotFound("no application"))
+			return
+		}
+		helper.RespondError(w, r, apperror.InternalError("lookup failed", err))
+		return
+	}
+	helper.RespondJSON(w, r, http.StatusOK, map[string]any{"id": da.ID, "user_id": da.UserID, "status": da.Status, "notes": da.Notes})
+}
+
+func (h *AdminHandler) HandleGetDriverApplicationByApplicationID(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	appId, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		helper.RespondError(w, r, apperror.BadRequest("invalid app id"))
+		return
+	}
+	da, err := h.DriverApplicationStore.GetByID(ctx, appId)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			helper.RespondError(w, r, apperror.NotFound("application lookup failed"))
+			return
+		}
+		helper.RespondJSON(w, r, http.StatusOK, map[string]any{"id": da.ID, "user_id": da.UserID, "status": da.Status, "notes": da.Notes})
+	}
+}

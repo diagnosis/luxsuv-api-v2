@@ -32,7 +32,7 @@ func SetRouter(app *app.Application) *chi.Mux {
 
 	r.Route("/api/v1", func(api chi.Router) {
 		// Tighter limits for auth-sensitive endpoints
-		authLimiter := customMiddleware.NewRateLimiter(5, time.Minute)
+		authLimiter := customMiddleware.NewRateLimiter(30, time.Minute)
 
 		// --- Auth (public, but rate-limited more strictly)
 		api.Group(func(auth chi.Router) {
@@ -55,6 +55,8 @@ func SetRouter(app *app.Application) *chi.Mux {
 		api.Group(func(adminOnly chi.Router) {
 			adminOnly.Use(customMiddleware.RequireJWT(app.Signer))
 			adminOnly.Use(customMiddleware.RequireRole("admin", "super_admin"))
+			adminOnly.Get("/admin/driver-applications/{id}", app.AdminHandler.HandleGetDriverApplicationByApplicationID)
+			adminOnly.Get("/admin/driver-applications/{userID}", app.AdminHandler.HandleGetDriverApplicationByUserID)
 			adminOnly.Patch("/admin/driver-applications/{id}", app.AdminHandler.HandleReviewDriverApplication)
 			// adminOnly.Get("/drivers", app.AdminHandler.ListDrivers)
 		})
